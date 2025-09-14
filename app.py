@@ -123,6 +123,49 @@ else:
     data = st.session_state.data
     st.sidebar.info("📊 Using generated sample data")
 
+# Column mapping section
+if uploaded_file is not None and data is not None:
+    st.sidebar.markdown("### 📋 Column Mapping")
+    st.sidebar.write("Map your Excel columns to required fields:")
+    
+    required_columns = {
+        'InvoiceDate': 'Invoice Date',
+        'Branch': 'Branch/Location', 
+        'Salesperson': 'Sales Person',
+        'ClientName': 'Client Name',
+        'TestName': 'Test Name',
+        'Specialty': 'Test Category/Specialty',
+        'TestMRP': 'Test MRP/Price',
+        'BilledAmount': 'Billed Amount',
+        'NetRevenue': 'Net Revenue',
+        'PaymentMethod': 'Payment Method'
+    }
+    
+    # Create mapping
+    column_mapping = {}
+    available_columns = ['None'] + list(data.columns)
+    
+    for required_col, description in required_columns.items():
+        mapped_col = st.sidebar.selectbox(
+            f"{description}:",
+            available_columns,
+            key=f"map_{required_col}"
+        )
+        if mapped_col != 'None':
+            column_mapping[required_col] = mapped_col
+    
+    # Apply mapping to rename columns
+    if column_mapping:
+        # Rename columns to match expected names
+        data = data.rename(columns={v: k for k, v in column_mapping.items()})
+        
+        # Fill missing required columns with defaults
+        for req_col in required_columns.keys():
+            if req_col not in data.columns:
+                if req_col in ['TestMRP', 'BilledAmount', 'NetRevenue']:
+                    data[req_col] = 0
+                else:
+                    data[req_col] = 'Unknown'
 
 
 # Sidebar filters
