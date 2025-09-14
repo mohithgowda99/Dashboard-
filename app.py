@@ -1,23 +1,14 @@
-# Truemedix Analytics Dashboard
-# Minimalist premium UI + robust file handling + target tracking
-
+# Truemedix Analytics Dashboard — Premium Nav + Robust Loader
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
-import io
-import json
-import os
-import logging
-import calendar
-import re
+import io, json, os, logging, calendar, re
 from pathlib import Path
 
-# -----------------------------------------------------------------------------
-# Page config (Renamed)
-# -----------------------------------------------------------------------------
+# -------- Page config --------
 st.set_page_config(
     page_title="Truemedix Analytics Dashboard",
     page_icon="📊",
@@ -25,12 +16,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
+# -------- Logging --------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# -------- Constants / Config --------
 CONFIG_FILE = "enhanced_dashboard_config.json"
 
 REQUIRED_COLUMNS = [
@@ -56,17 +46,13 @@ DATE_COLUMNS = ["InvoiceDate", "ClientAddedDate"]
 NUMERIC_COLUMNS = ["TestMRP", "BilledAmount", "NetRevenue"]
 
 DEFAULT_CONFIG = {
-    "monthly_target": 10000000.0,  # 1 Cr default
-    "targets": {
-        1: 10000000, 2: 9500000, 3: 11000000, 4: 10500000, 5: 11500000, 6: 12000000,
-        7: 13000000, 8: 12500000, 9: 11000000, 10: 14000000, 11: 13500000, 12: 15000000
-    },
+    "monthly_target": 10000000.0,
+    "targets": {1:10000000,2:9500000,3:11000000,4:10500000,5:11500000,6:12000000,
+                7:13000000,8:12500000,9:11000000,10:14000000,11:13500000,12:15000000},
     "last_file_path": None
 }
 
-# -----------------------------------------------------------------------------
-# Config helpers
-# -----------------------------------------------------------------------------
+# -------- Config helpers --------
 @st.cache_data
 def load_config() -> dict:
     if os.path.exists(CONFIG_FILE):
@@ -89,9 +75,7 @@ def save_config(cfg: dict):
     except Exception as e:
         logger.warning(f"Could not save config: {e}")
 
-# -----------------------------------------------------------------------------
-# Robust file processing
-# -----------------------------------------------------------------------------
+# -------- Robust file processing --------
 def detect_encoding(file_bytes: bytes) -> str:
     try:
         import chardet
@@ -126,75 +110,57 @@ def clean_excel_data(df: pd.DataFrame):
 
     df = df.dropna(how="all")
 
-    summary_tokens = [
-        "total", "subtotal", "grand total", "sum", "summary", "aggregate",
-        "overall", "combined", "consolidated", "final", "end"
-    ]
+    # Remove summary rows
+    summary_tokens = ["total","subtotal","grand total","sum","summary","aggregate","overall","combined","consolidated","final","end"]
     mask_keep = pd.Series(True, index=df.index)
     for col in df.select_dtypes(include=["object"]).columns:
         col_mask = ~df[col].astype(str).str.lower().str.contains("|".join(summary_tokens), regex=True, na=False)
         mask_keep &= col_mask
     df = df[mask_keep]
     if len(df) < original_rows:
-        notes.append(f"Removed {original_rows - len(df)} summary/total rows")
+        notes.append("Removed summary/total rows")
 
+    # Numeric cleaning
     for col in [c for c in NUMERIC_COLUMNS if c in df.columns]:
         try:
-            s = df[col].astype(str)\
-                       .str.replace("₹", "", regex=False)\
-                       .str.replace("Rs.", "", regex=False)\
-                       .str.replace(",", "", regex=False)\
-                       .str.replace("$", "", regex=False)\
-                       .str.strip()
-            s = s.replace(["nan", "null", "none", "", "N/A", "n/a"], np.nan)
-            s = pd.to_numeric(s, errors="coerce")
-            nan_count = s.isna().sum()
-            if nan_count > 0:
-                notes.append(f"{nan_count} invalid values in {col} replaced with 0")
-            s = s.fillna(0)
-            if col in ["NetRevenue", "BilledAmount", "TestMRP"]:
-                neg = (s < 0).sum()
-                if neg > 0:
-                    notes.append(f"{neg} negative values in {col} converted to absolute")
-                s = s.abs()
+            s = df[col].astype(str).str.replace("₹","",regex=False).str.replace("Rs.","",regex=False)\
+                 .str.replace(",","",regex=False).str.replace("$","",regex=False).str.strip()
+            s = s.replace(["nan","null","none","","N/A","n/a"], np.nan)
+            s = pd.to_numeric(s, errors="coerce").fillna(0)
+            s = s.abs()
             df[col] = s
         except Exception as e:
-            notes.append(f"Error processing numeric column {col}: {e}")
+            notes.append(f"Numeric clean error {col}: {e}")
 
+    # Date parsing
     for col in [c for c in DATE_COLUMNS if c in df.columns]:
         try:
             d = pd.to_datetime(df[col].astype(str), errors="coerce", dayfirst=True, infer_datetime_format=True)
-            invalid = d.isna().sum()
-            if invalid > 0:
-                notes.append(f"{invalid} invalid dates in {col}")
             if col == "InvoiceDate":
                 d = d.fillna(pd.Timestamp.now())
-                notes.append("Filled missing InvoiceDate with current date")
             elif col == "ClientAddedDate":
-                if "InvoiceDate" in df.columns:
-                    d = d.fillna(pd.to_datetime(df["InvoiceDate"], errors="coerce"))
+                d = d.fillna(pd.to_datetime(df.get("InvoiceDate"), errors="coerce"))
             df[col] = d
         except Exception as e:
-            notes.append(f"Error parsing date column {col}: {e}")
+            notes.append(f"Date parse error {col}: {e}")
 
-    before = len(df)
+    # Critical filters
     if "InvoiceDate" in df.columns:
         df = df[df["InvoiceDate"].notna()]
-    rev_cols = [c for c in ["NetRevenue", "BilledAmount", "TestMRP"] if c in df.columns]
+    rev_cols = [c for c in ["NetRevenue","BilledAmount","TestMRP"] if c in df.columns]
     if rev_cols:
         df = df[df[rev_cols].gt(0).any(axis=1)]
-    if len(df) < before:
-        notes.append(f"Removed {before - len(df)} rows with missing date or zero revenue")
 
-    final_rows = len(df)
-    if final_rows == 0:
-        notes.append("ERROR: No valid data after cleaning")
+    # Finalize
+    if len(df) == 0:
+        notes.append("ERROR: No valid rows after cleaning")
     else:
-        notes.append(f"Cleaning complete: {final_rows}/{original_rows} rows retained ({final_rows/original_rows*100:.1f}%)")
+        notes.append(f"Cleaning done: {len(df)} rows")
 
     return df, notes
 
-@st.cache_data
+# Hash-safe, list-safe cached loader
+@st.cache_data(hash_funcs={bytes: lambda b: hash(b)})
 def load_and_process_file(file_bytes: bytes, filename: str):
     warnings = []
     errors = []
@@ -202,24 +168,23 @@ def load_and_process_file(file_bytes: bytes, filename: str):
     ext = Path(filename).suffix.lower()
 
     try:
-        # 1) Read file
+        # Read file
         if ext == ".csv":
             enc = detect_encoding(file_bytes)
             try:
                 df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
             except Exception:
-                for fallback in ["utf-8", "latin1", "cp1252"]:
+                for fallback in ["utf-8","latin1","cp1252"]:
                     try:
                         df = pd.read_csv(io.BytesIO(file_bytes), encoding=fallback)
-                        warnings.append(str(f"Used {fallback} encoding for CSV"))
+                        warnings.append(f"Used {fallback} encoding for CSV")
                         break
                     except Exception:
                         continue
                 if df is None:
-                    errors.append(str("Could not parse CSV with common encodings"))
+                    errors.append("Could not parse CSV with common encodings")
                     return None, tuple(warnings), tuple(errors)
-
-        elif ext in [".xlsx", ".xls"]:
+        elif ext in [".xlsx",".xls"]:
             try:
                 xl = pd.ExcelFile(io.BytesIO(file_bytes))
                 df = None
@@ -228,47 +193,51 @@ def load_and_process_file(file_bytes: bytes, filename: str):
                         temp = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet)
                         if len(temp) > 0 and len(temp.columns) > 5:
                             df = temp
-                            if sheet != xl.sheet_names[0]:
-                                warnings.append(str(f"Using sheet '{sheet}'"))
+                            if sheet != xl.sheet_names:
+                                warnings.append(f"Using sheet '{sheet}'")
                             break
                     except Exception as e:
-                        warnings.append(str(f"Skipping sheet '{sheet}': {e}"))
+                        warnings.append(f"Skipping sheet '{sheet}': {e}")
                 if df is None:
                     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
             except Exception as e:
-                errors.append(str(f"Error reading Excel: {e}"))
+                errors.append(f"Error reading Excel: {e}")
                 return None, tuple(warnings), tuple(errors)
         else:
-            errors.append(str(f"Unsupported file type: {ext}"))
+            errors.append(f"Unsupported file type: {ext}")
             return None, tuple(warnings), tuple(errors)
 
         if df is None or len(df) == 0:
-            errors.append(str("No rows found in file"))
+            errors.append("No rows found in file")
             return None, tuple(warnings), tuple(errors)
 
-        # 2) Normalize + clean
+        # Normalize list-typed cells to strings (hash-safe)
+        try:
+            for col in df.columns:
+                if df[col].apply(lambda x: isinstance(x, list)).any():
+                    df[col] = df[col].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, list) else x)
+        except Exception as e:
+            warnings.append(f"List-to-JSON normalization warning: {e}")
+
+        # Normalize headers and clean
         df = normalize_column_names(df)
         df, cleaning_notes = clean_excel_data(df)
-        for n in cleaning_notes:
-            warnings.append(str(n))
+        warnings.extend(cleaning_notes)
 
-        # 3) Validate required columns
+        # Validate required columns
         missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
         if missing:
-            errors.append(str(f"Missing required columns: {', '.join(missing)}"))
+            errors.append(f"Missing required columns: {', '.join(missing)}")
 
-        # IMPORTANT: return tuples (hash-safe for Streamlit cache)
+        # Return immutable messages for cache hashing
         return df, tuple(warnings), tuple(errors)
 
     except Exception as e:
         logger.exception("Unexpected file processing error")
-        errors.append(str(f"Unexpected error: {e}"))
+        errors.append(f"Unexpected error: {e}")
         return None, tuple(warnings), tuple(errors)
 
-
-# -----------------------------------------------------------------------------
-# Transforms & Filters
-# -----------------------------------------------------------------------------
+# -------- Transforms / Filters --------
 @st.cache_data
 def transform_data(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -292,8 +261,7 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
             start_date, end_date = filters["date_range"]
             out = out[(out["InvoiceDate"] >= pd.Timestamp(start_date)) &
                       (out["InvoiceDate"] <= pd.Timestamp(end_date))]
-        for col_ui, key in [("Branch", "branch"), ("Salesperson", "salesperson"),
-                            ("ClientName", "clientname"), ("Specialty", "specialty")]:
+        for col_ui, key in [("Branch","branch"),("Salesperson","salesperson"),("ClientName","clientname"),("Specialty","specialty")]:
             if key in filters and filters[key] and col_ui in out.columns:
                 out = out[out[col_ui].isin(filters[key])]
         if filters.get("high_value_only") and "Tests_999_Flag" in out.columns:
@@ -306,9 +274,7 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
         logger.warning(f"Filter application error: {e}")
     return out
 
-# -----------------------------------------------------------------------------
-# Target Tracking
-# -----------------------------------------------------------------------------
+# -------- Target Tracking --------
 def compute_target_metrics(df: pd.DataFrame, monthly_target: float) -> dict:
     if df is None or df.empty:
         return dict(
@@ -317,19 +283,15 @@ def compute_target_metrics(df: pd.DataFrame, monthly_target: float) -> dict:
             monthly_projection=0, completion_percent=0, daily_average=0,
             remaining_target=monthly_target, required_daily_run_rate=0
         )
-
     today = datetime.now()
     y, m, d = today.year, today.month, today.day
-    days_in_month = calendar.monthrange(y, m)[4]
+    days_in_month = calendar.monthrange(y, m)[22]
     days_elapsed = min(d, days_in_month)
     days_remaining = max(0, days_in_month - d)
-
     daily_target = monthly_target / days_in_month
-
     month_start = pd.Timestamp(datetime(y, m, 1))
     mtd = df[(df["InvoiceDate"] >= month_start) & (df["InvoiceDate"] <= pd.Timestamp(today.date()))]
     actual = float(mtd["NetRevenue"].sum()) if "NetRevenue" in df.columns else 0.0
-
     expected = daily_target * days_elapsed
     variance_amount = actual - expected
     variance_percent = (variance_amount / expected * 100.0) if expected > 0 else 0.0
@@ -338,32 +300,15 @@ def compute_target_metrics(df: pd.DataFrame, monthly_target: float) -> dict:
     completion_percent = (days_elapsed / days_in_month) * 100.0
     remaining_target = max(0.0, monthly_target - actual)
     required_daily_run_rate = (remaining_target / days_remaining) if days_remaining > 0 else 0.0
-
     return dict(
-        daily_target=daily_target,
-        days_in_month=days_in_month,
-        days_elapsed=days_elapsed,
-        days_remaining=days_remaining,
-        expected_revenue=expected,
-        actual_revenue=actual,
-        variance_amount=variance_amount,
-        variance_percent=variance_percent,
-        monthly_projection=monthly_projection,
-        completion_percent=completion_percent,
-        daily_average=daily_avg,
-        remaining_target=remaining_target,
-        required_daily_run_rate=required_daily_run_rate
+        daily_target=daily_target, days_in_month=days_in_month, days_elapsed=days_elapsed, days_remaining=days_remaining,
+        expected_revenue=expected, actual_revenue=actual, variance_amount=variance_amount, variance_percent=variance_percent,
+        monthly_projection=monthly_projection, completion_percent=completion_percent, daily_average=daily_avg,
+        remaining_target=remaining_target, required_daily_run_rate=required_daily_run_rate
     )
 
-# -----------------------------------------------------------------------------
-# Header (Minimalist premium)
-# -----------------------------------------------------------------------------
-st.title("Truemedix Analytics Dashboard")
-st.caption("Minimal, fast, and reliable revenue insights with robust Excel handling and intelligent target tracking.")
-
+# -------- Session init --------
 config = load_config()
-
-# Session init
 if "df" not in st.session_state:
     st.session_state.df = None
 if "warnings" not in st.session_state:
@@ -372,12 +317,24 @@ if "monthly_target" not in st.session_state:
     mon = datetime.now().month
     st.session_state.monthly_target = float(config.get("targets", {}).get(mon, config.get("monthly_target", 10000000.0)))
 
-# -----------------------------------------------------------------------------
-# Sidebar
-# -----------------------------------------------------------------------------
+# -------- Premium Sidebar Navigation --------
 with st.sidebar:
-    st.header("Data Upload")
-    upl = st.file_uploader("Upload Excel/CSV", type=["csv", "xlsx", "xls"])
+    st.markdown("### Truemedix Navigation")
+    nav = st.radio(
+        label="Go to",
+        options=["Upload & Status","Overview","Performance","Collections","Targets","Data"],
+        index=0,
+        label_visibility="collapsed"
+    )
+
+# -------- Top Header --------
+st.title("Truemedix Analytics Dashboard")
+st.caption("Minimal, fast, and reliable revenue insights with robust Excel handling and intelligent target tracking.")
+
+# -------- Upload & Status (Side panel option) --------
+if nav == "Upload & Status":
+    st.subheader("Data Upload")
+    upl = st.file_uploader("Upload Excel/CSV", type=["csv","xlsx","xls"])
     if upl is not None:
         with st.spinner("Processing file..."):
             file_bytes = upl.read()
@@ -389,11 +346,11 @@ with st.sidebar:
             if notes:
                 with st.expander("Processing details", expanded=len(errs) == 0):
                     for n in notes:
-                        if n.startswith("ERROR"):
+                        if str(n).startswith("ERROR"):
                             st.error(n)
                         else:
                             st.info(n)
-                st.session_state.warnings = notes
+                st.session_state.warnings = list(notes)
             if df_raw is not None and len(df_raw) > 0:
                 st.session_state.df = transform_data(df_raw)
                 config["last_file_path"] = upl.name
@@ -402,34 +359,62 @@ with st.sidebar:
                     st.success(f"Loaded {len(st.session_state.df):,} records")
                 else:
                     st.warning(f"Loaded {len(st.session_state.df):,} records with issues")
+    if st.session_state.df is not None:
+        st.divider()
+        df_info = st.session_state.df
+        colA, colB, colC = st.columns(3)
+        with colA:
+            st.metric("Records", f"{len(df_info):,}")
+        with colB:
+            if "InvoiceDate" in df_info.columns:
+                st.metric("Date Range", f"{df_info['InvoiceDate'].min().date()} → {df_info['InvoiceDate'].max().date()}")
+        with colC:
+            if "NetRevenue" in df_info.columns:
+                st.metric("Total Revenue", f"₹{df_info['NetRevenue'].sum():,.0f}")
 
-    st.divider()
-    st.header("Target Configuration")
-    current_month = datetime.now().month
-    val = st.number_input(
-        f"Monthly Target (₹) - {calendar.month_name[current_month]}",
-        value=float(st.session_state.monthly_target or 10000000.0),
-        min_value=0.0,
-        step=100000.0,
-        format="%.0f"
-    )
-    st.session_state.monthly_target = float(val)
+# -------- Filters helper UI (used across sections) --------
+def filters_ui(df: pd.DataFrame):
+    with st.expander("Filters", expanded=True):
+        cols = st.columns(4)
+        date_range = None
+        if "InvoiceDate" in df.columns:
+            min_d = df["InvoiceDate"].min().date()
+            max_d = df["InvoiceDate"].max().date()
+            with cols:
+                date_range = st.date_input("Date Range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+        f = {"date_range": date_range if isinstance(date_range, tuple) and len(date_range) == 2 else None}
+        with cols[22]:
+            if "Branch" in df.columns:
+                f["branch"] = st.multiselect("Branch", sorted(df["Branch"].dropna().astype(str).unique().tolist()))
+        with cols[23]:
+            if "Salesperson" in df.columns:
+                f["salesperson"] = st.multiselect("Salesperson", sorted(df["Salesperson"].dropna().astype(str).unique().tolist()))
+        with cols[24]:
+            if "Specialty" in df.columns:
+                f["specialty"] = st.multiselect("Specialty", sorted(df["Specialty"].dropna().astype(str).unique().tolist()))
+        cols2 = st.columns(2)
+        with cols2:
+            high = st.checkbox("Only tests ≥ ₹999", value=False)
+            f["high_value_only"] = high
+        with cols2[22]:
+            f["test_search"] = st.text_input("Search Test Name", placeholder="Enter test name...")
+    return f
 
-    # FIX: Proper st.columns usage for preset buttons
-    pc1, pc2, pc3, pc4 = st.columns(4, gap="small")
-    with pc1:
-        if st.button("₹50L"):
-            st.session_state.monthly_target = 5_000_000.0
-            st.rerun()
-    with pc2:
-        if st.button("₹1Cr"):
-            st.session_state.monthly_target = 10_000_000.0
-            st.rerun()
-    with pc3:
-        if st.button("₹1.5Cr"):
-            st.session_state.monthly_target = 15_000_000.0
-            st.rerun()
-    with pc4:
-        if st.button("₹2Cr"):
-            st.session_state.monthly_target = 20_000_000.0
-            st
+# -------- Overview --------
+if nav == "Overview" and st.session_state.df is not None:
+    df_view = apply_filters(st.session_state.df, filters_ui(st.session_state.df))
+    m1, m2, m3, m4 = st.columns(4, gap="medium")
+    total_revenue = float(df_view["NetRevenue"].sum()) if "NetRevenue" in df_view.columns else 0.0
+    total_billed = float(df_view["BilledAmount"].sum()) if "BilledAmount" in df_view.columns else 0.0
+    total_tests = len(df_view)
+    total_due = max(0.0, total_billed - total_revenue) if total_billed and total_revenue is not None else 0.0
+    with m1: st.metric("Revenue", f"₹{total_revenue:,.0f}")
+    with m2: st.metric("Collected (Net)", f"₹{total_revenue:,.0f}")
+    with m3: st.metric("Due (Billed - Net)", f"₹{total_due:,.0f}")
+    with m4: st.metric("Tests", f"{total_tests:,}")
+
+    # Target row
+    t = compute_target_metrics(df_view, float(st.session_state.monthly_target))
+    tm1, tm2, tm3 = st.columns(3, gap="medium")
+    with tm1: st.metric("Target by Today", f"₹{t['expected_revenue']:,.0f}", delta=f"₹{t['variance_amount']:,.0f} ({t['variance_percent']:+.1f}%)")
+    with tm2: st.metric("Monthly Projection", f"₹{t['monthly_projection']:
