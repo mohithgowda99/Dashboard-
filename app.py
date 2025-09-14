@@ -77,11 +77,53 @@ def generate_enhanced_sample_data():
     
     return pd.DataFrame(data).sort_values('InvoiceDate')
 
-# Load data
-if 'data' not in st.session_state:
-    st.session_state.data = generate_enhanced_sample_data()
+# File upload section
+st.sidebar.markdown("## 📁 Data Source")
+upload_option = st.sidebar.radio("Choose data source:", ["Upload Excel/CSV File", "Use Sample Data"])
 
-data = st.session_state.data
+if upload_option == "Upload Excel/CSV File":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload your Excel or CSV file", 
+        type=['xlsx', 'xls', 'csv'],
+        help="Upload your lab test data in Excel or CSV format"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            # Check file type and read accordingly
+            if uploaded_file.name.endswith('.csv'):
+                data = pd.read_csv(uploaded_file)
+            else:
+                # For Excel files, you can specify sheet name
+                sheet_names = pd.ExcelFile(uploaded_file).sheet_names
+                if len(sheet_names) > 1:
+                    selected_sheet = st.sidebar.selectbox("Select sheet:", sheet_names)
+                    data = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+                else:
+                    data = pd.read_excel(uploaded_file)
+            
+            st.sidebar.success(f"✅ File uploaded successfully! {len(data)} records loaded.")
+            
+            # Show data preview
+            with st.sidebar.expander("📋 Data Preview"):
+                st.write(f"Columns: {list(data.columns)}")
+                st.write(f"Rows: {len(data)}")
+                
+        except Exception as e:
+            st.sidebar.error(f"❌ Error reading file: {str(e)}")
+            st.sidebar.info("Using sample data instead...")
+            data = generate_enhanced_sample_data()
+    else:
+        st.sidebar.info("👆 Please upload a file to proceed")
+        data = generate_enhanced_sample_data()
+else:
+    # Use sample data
+    if 'data' not in st.session_state:
+        st.session_state.data = generate_enhanced_sample_data()
+    data = st.session_state.data
+    st.sidebar.info("📊 Using generated sample data")
+
+
 
 # Sidebar filters
 st.sidebar.title("🔬 Lab Dashboard Filters")
