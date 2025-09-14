@@ -202,6 +202,7 @@ def load_and_process_file(file_bytes: bytes, filename: str):
     ext = Path(filename).suffix.lower()
 
     try:
+        # 1) Read file
         if ext == ".csv":
             enc = detect_encoding(file_bytes)
             try:
@@ -210,50 +211,60 @@ def load_and_process_file(file_bytes: bytes, filename: str):
                 for fallback in ["utf-8", "latin1", "cp1252"]:
                     try:
                         df = pd.read_csv(io.BytesIO(file_bytes), encoding=fallback)
-                        warnings.append(f"Used {fallback} encoding for CSV")
+                        warnings.append(str(f"Used {fallback} encoding for CSV"))
                         break
                     except Exception:
                         continue
                 if df is None:
-                    raise ValueError("Could not parse CSV with common encodings")
+                    errors.append(str("Could not parse CSV with common encodings"))
+                    return None, tuple(warnings), tuple(errors)
+
         elif ext in [".xlsx", ".xls"]:
             try:
                 xl = pd.ExcelFile(io.BytesIO(file_bytes))
                 df = None
                 for sheet in xl.sheet_names:
-                    temp = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet)
-                    if len(temp) > 0 and len(temp.columns) > 5:
-                        df = temp
-                        if sheet != xl.sheet_names:
-                            warnings.append(f"Using sheet '{sheet}'")
-                        break
+                    try:
+                        temp = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet)
+                        if len(temp) > 0 and len(temp.columns) > 5:
+                            df = temp
+                            if sheet != xl.sheet_names[0]:
+                                warnings.append(str(f"Using sheet '{sheet}'"))
+                            break
+                    except Exception as e:
+                        warnings.append(str(f"Skipping sheet '{sheet}': {e}"))
                 if df is None:
                     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
             except Exception as e:
-                errors.append(f"Error reading Excel: {e}")
-                return None, warnings, errors
+                errors.append(str(f"Error reading Excel: {e}"))
+                return None, tuple(warnings), tuple(errors)
         else:
-            errors.append(f"Unsupported file type: {ext}")
-            return None, warnings, errors
+            errors.append(str(f"Unsupported file type: {ext}"))
+            return None, tuple(warnings), tuple(errors)
 
         if df is None or len(df) == 0:
-            errors.append("No rows found in file")
-            return None, warnings, errors
+            errors.append(str("No rows found in file"))
+            return None, tuple(warnings), tuple(errors)
 
+        # 2) Normalize + clean
         df = normalize_column_names(df)
         df, cleaning_notes = clean_excel_data(df)
-        warnings.extend(cleaning_notes)
+        for n in cleaning_notes:
+            warnings.append(str(n))
 
+        # 3) Validate required columns
         missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
         if missing:
-            errors.append(f"Missing required columns: {', '.join(missing)}")
+            errors.append(str(f"Missing required columns: {', '.join(missing)}"))
 
-        return df, warnings, errors
+        # IMPORTANT: return tuples (hash-safe for Streamlit cache)
+        return df, tuple(warnings), tuple(errors)
 
     except Exception as e:
         logger.exception("Unexpected file processing error")
-        errors.append(f"Unexpected error: {e}")
-        return None, warnings, errors
+        errors.append(str(f"Unexpected error: {e}"))
+        return None, tuple(warnings), tuple(errors)
+
 
 # -----------------------------------------------------------------------------
 # Transforms & Filters
