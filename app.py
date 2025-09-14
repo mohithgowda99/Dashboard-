@@ -1,582 +1,598 @@
-# Truemedix Analytics Dashboard — Error-Free Version
+"""
+Truemedix Diagnostics Lab Dashboard
+Simple, reliable analytics for revenue and client tracking
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
-import io, json, os, logging, calendar, re
-from pathlib import Path
+from plotly.subplots import make_subplots
+import io
+import base64
+from datetime import datetime, timedelta
+import json
+import os
+import calendar
+import re
+import warnings
+warnings.filterwarnings('ignore')
 
-# Page config
-st.set_page_config(
-    page_title="Truemedix Analytics Dashboard",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
 
-# Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Configuration
-CONFIG_FILE = "truemedix_config.json"
-
-REQUIRED_COLUMNS = [
-    "InvoiceDate", "Branch", "Salesperson", "ClientName", "TestName",
-    "Specialty", "TestMRP", "BilledAmount", "NetRevenue", "InvoiceID", "ClientAddedDate"
-]
-
+# Column name mapping (case-insensitive)
 COLUMN_MAPPING = {
-    "invoice_date": ["InvoiceDate", "Invoice Date", "Date", "Transaction Date", "Bill Date"],
-    "branch": ["Branch", "Location", "Centre", "Lab"],
-    "salesperson": ["Salesperson", "Sales Person", "Executive", "Agent", "Rep"],
-    "client_name": ["ClientName", "Client Name", "Customer", "Hospital", "Patient"],
-    "test_name": ["TestName", "Test Name", "Service", "Investigation"],
-    "specialty": ["Specialty", "Department", "Category", "Type"],
-    "test_mrp": ["TestMRP", "Test MRP", "MRP", "List Price", "Rate"],
-    "billed_amount": ["BilledAmount", "Billed Amount", "Bill Amount", "Gross Amount", "Total"],
-    "net_revenue": ["NetRevenue", "Net Revenue", "Net Amount", "Final Amount", "Collected"],
-    "invoice_id": ["InvoiceID", "Invoice ID", "Bill No", "Receipt No", "Transaction ID"],
-    "client_added_date": ["ClientAddedDate", "Client Added Date", "Registration Date", "Join Date"]
+    'InvoiceDate': ['Invoice Date', 'Date', 'Transaction Date', 'Bill Date'],
+    'Branch': ['Branch', 'Location', 'Centre', 'Lab'],
+    'Salesperson': ['Salesperson', 'Sales Person', 'Executive', 'Agent', 'Marketing Person', 'Marketing Person(Organisation)'],
+    'ClientName': ['ClientName', 'Client Name', 'Customer', 'Hospital', 'Patient'],
+    'TestName': ['TestName', 'Test Name', 'Service', 'Investigation'],
+    'NetRevenue': ['NetRevenue', 'Net Revenue', 'Net Amount', 'Final Amount', 'Collected'],
+    'BilledAmount': ['BilledAmount', 'Billed Amount', 'Bill Amount', 'Gross Amount', 'Total'],
+    'ClientAddedDate': ['ClientAddedDate', 'Client Added Date', 'Registration Date', 'Join Date']
 }
 
-DATE_COLUMNS = ["InvoiceDate", "ClientAddedDate"]
-NUMERIC_COLUMNS = ["TestMRP", "BilledAmount", "NetRevenue"]
+CONFIG_FILE = 'truemedix_config.json'
+DEFAULT_TARGET = 10000000  # ₹1 crore
 
-DEFAULT_CONFIG = {
-    "monthly_target": 10000000.0,
-    "targets": {1:10000000,2:9500000,3:11000000,4:10500000,5:11500000,6:12000000,
-                7:13000000,8:12500000,9:11000000,10:14000000,11:13500000,12:15000000},
-    "last_file_path": None
-}
+# ==============================================================================
+# UTILITY FUNCTIONS
+# ==============================================================================
 
-# Helper functions
-@st.cache_data
 def load_config():
+    """Load dashboard configuration"""
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
-                cfg = json.load(f)
-            for k, v in DEFAULT_CONFIG.items():
-                if k not in cfg:
-                    cfg[k] = v
-            return cfg
-        except Exception as e:
-            logger.warning(f"Could not load config: {e}")
-            return DEFAULT_CONFIG.copy()
-    return DEFAULT_CONFIG.copy()
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {'monthly_target': DEFAULT_TARGET}
 
-def save_config(cfg):
+def save_config(config):
+    """Save dashboard configuration"""
     try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(cfg, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Could not save config: {e}")
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f)
+    except:
+        pass
 
-def detect_encoding(file_bytes):
-    try:
-        import chardet
-        result = chardet.detect(file_bytes)
-        return result.get("encoding") or "utf-8"
-    except Exception:
-        return "utf-8"
-
-def normalize_column_names(df):
-    df_norm = df.copy()
-    original_cols = df_norm.columns.tolist()
-    col_map = {}
+def normalize_columns(df):
+    """Normalize column names using mapping - FIXED"""
+    column_map = {}
     
-    for _, candidates in COLUMN_MAPPING.items():
-        primary = candidates
-        for orig in original_cols:
-            o_clean = re.sub(r"\s+", " ", str(orig).strip().lower())
-            for cand in candidates:
-                c_clean = re.sub(r"\s+", " ", cand.strip().lower())
-                if o_clean == c_clean or c_clean in o_clean:
-                    col_map[orig] = primary
-                    break
-            if orig in col_map:
+    for standard, variations in COLUMN_MAPPING.items():
+        for col in df.columns:
+            col_clean = col.lower().strip()
+            # Check if column matches standard or any variation
+            all_options = [standard.lower()] + [v.lower() for v in variations]
+            if col_clean in all_options:
+                column_map[col] = standard
                 break
     
-    if col_map:
-        df_norm.rename(columns=col_map, inplace=True)
-        logger.info(f"Column mapping applied: {col_map}")
-    return df_norm
+    return df.rename(columns=column_map)
 
-def clean_excel_data(df):
-    notes = []
-    original_rows = len(df)
-    
-    # Remove empty rows
-    df = df.dropna(how="all")
+def clean_data(df):
+    """Clean and process data"""
+    df = df.copy()
     
     # Remove summary rows
-    summary_tokens = ["total","subtotal","grand total","sum","summary","aggregate","overall","combined","consolidated","final","end"]
-    mask_keep = pd.Series(True, index=df.index)
-    for col in df.select_dtypes(include=["object"]).columns:
-        col_mask = ~df[col].astype(str).str.lower().str.contains("|".join(summary_tokens), regex=True, na=False)
-        mask_keep &= col_mask
-    df = df[mask_keep]
-    
-    if len(df) < original_rows:
-        notes.append("Removed summary/total rows")
-    
-    # Clean numeric columns
-    for col in [c for c in NUMERIC_COLUMNS if c in df.columns]:
-        try:
-            s = df[col].astype(str).str.replace("₹","",regex=False).str.replace("Rs.","",regex=False)
-            s = s.str.replace(",","",regex=False).str.replace("$","",regex=False).str.strip()
-            s = s.replace(["nan","null","none","","N/A","n/a"], np.nan)
-            s = pd.to_numeric(s, errors="coerce").fillna(0).abs()
-            df[col] = s
-        except Exception as e:
-            notes.append(f"Numeric clean error {col}: {e}")
-    
-    # Parse dates
-    for col in [c for c in DATE_COLUMNS if c in df.columns]:
-        try:
-            d = pd.to_datetime(df[col].astype(str), errors="coerce", dayfirst=True, infer_datetime_format=True)
-            if col == "InvoiceDate":
-                d = d.fillna(pd.Timestamp.now())
-            elif col == "ClientAddedDate":
-                d = d.fillna(pd.to_datetime(df.get("InvoiceDate"), errors="coerce"))
-            df[col] = d
-        except Exception as e:
-            notes.append(f"Date parse error {col}: {e}")
-    
-    # Filter critical data
-    if "InvoiceDate" in df.columns:
-        df = df[df["InvoiceDate"].notna()]
-    rev_cols = [c for c in ["NetRevenue","BilledAmount","TestMRP"] if c in df.columns]
-    if rev_cols:
-        df = df[df[rev_cols].gt(0).any(axis=1)]
-    
-    if len(df) == 0:
-        notes.append("ERROR: No valid rows after cleaning")
-    else:
-        notes.append(f"Cleaning done: {len(df)} rows")
-    
-    return df, notes
+    summary_indicators = ['total', 'subtotal', 'grand total', 'sum', 'summary']
+    for col in df.select_dtypes(include=['object']).columns:
+        mask = ~df[col].astype(str).str.lower().str.contains('|'.join(summary_indicators), na=False)
+        df = df[mask]
 
-@st.cache_data(hash_funcs={bytes: lambda b: hash(b)})
-def load_and_process_file(file_bytes, filename):
-    warnings = []
-    errors = []
-    df = None
-    ext = Path(filename).suffix.lower()
+    # Clean numeric columns
+    for col in ['NetRevenue', 'BilledAmount']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace('₹', '').str.replace(',', '').str.replace('Rs.', '')
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            df[col] = df[col].abs()  # Ensure non-negative
+
+    # Clean date columns
+    for col in ['InvoiceDate', 'ClientAddedDate']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+
+    # Handle missing ClientAddedDate
+    if 'ClientAddedDate' not in df.columns or df['ClientAddedDate'].isna().all():
+        # Use first InvoiceDate for each client
+        first_invoice = df.groupby('ClientName')['InvoiceDate'].min().reset_index()
+        first_invoice.columns = ['ClientName', 'ClientAddedDate']
+        df = df.merge(first_invoice, on='ClientName', how='left', suffixes=('', '_new'))
+        if 'ClientAddedDate_new' in df.columns:
+            df['ClientAddedDate'] = df['ClientAddedDate'].fillna(df['ClientAddedDate_new'])
+            df = df.drop('ClientAddedDate_new', axis=1)
+
+    # Remove rows with no valid data
+    df = df[df['NetRevenue'] > 0]
+    df = df[df['InvoiceDate'].notna()]
     
-    try:
-        # Read file based on extension
-        if ext == ".csv":
-            enc = detect_encoding(file_bytes)
-            try:
-                df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
-            except Exception:
-                for fallback in ["utf-8","latin1","cp1252"]:
-                    try:
-                        df = pd.read_csv(io.BytesIO(file_bytes), encoding=fallback)
-                        warnings.append(f"Used {fallback} encoding for CSV")
-                        break
-                    except Exception:
-                        continue
-                if df is None:
-                    errors.append("Could not parse CSV")
-                    return None, tuple(warnings), tuple(errors)
-        
-        elif ext in [".xlsx",".xls"]:
-            try:
-                xl = pd.ExcelFile(io.BytesIO(file_bytes))
-                df = None
-                for sheet in xl.sheet_names:
-                    try:
-                        temp = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet)
-                        if len(temp) > 0 and len(temp.columns) > 5:
-                            df = temp
-                            if sheet != xl.sheet_names:
-                                warnings.append(f"Using sheet '{sheet}'")
-                            break
-                    except Exception as e:
-                        warnings.append(f"Skipping sheet '{sheet}': {e}")
-                if df is None:
-                    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
-            except Exception as e:
-                errors.append(f"Error reading Excel: {e}")
-                return None, tuple(warnings), tuple(errors)
-        
-        else:
-            errors.append(f"Unsupported file type: {ext}")
-            return None, tuple(warnings), tuple(errors)
-        
-        if df is None or len(df) == 0:
-            errors.append("No rows found in file")
-            return None, tuple(warnings), tuple(errors)
-        
-        # Process the data
-        df = normalize_column_names(df)
-        df, cleaning_notes = clean_excel_data(df)
-        warnings.extend(cleaning_notes)
-        
-        # Validate columns
-        missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-        if missing:
-            errors.append(f"Missing required columns: {', '.join(missing)}")
-        
-        return df, tuple(warnings), tuple(errors)
-        
-    except Exception as e:
-        logger.exception("File processing error")
-        errors.append(f"Unexpected error: {e}")
-        return None, tuple(warnings), tuple(errors)
+    return df
 
 @st.cache_data
-def transform_data(df):
-    d = df.copy()
-    if "InvoiceDate" in d.columns:
-        d["Month"] = d["InvoiceDate"].dt.to_period("M").dt.start_time
-        d["InvoiceDay"] = d["InvoiceDate"].dt.day
-        d["WeekOfYear"] = d["InvoiceDate"].dt.isocalendar().week
-        d["DayOfWeek"] = d["InvoiceDate"].dt.day_name()
-    if "ClientAddedDate" in d.columns:
-        d["ClientAddedMonth"] = d["ClientAddedDate"].dt.to_period("M").dt.start_time
-    if "NetRevenue" in d.columns:
-        d["Tests_999_Flag"] = d["NetRevenue"] >= 999
-    if "Specialty" in d.columns and "TestMRP" in d.columns:
-        d["SpecialtyTest"] = (~d["Specialty"].isna()) & (d["TestMRP"] >= 999)
-    return d
-
-def apply_filters(df, filters):
-    out = df.copy()
+def load_excel_file(file_content, filename):
+    """Load and process Excel/CSV file"""
     try:
-        if filters.get("date_range"):
-            start_date, end_date = filters["date_range"]
-            out = out[(out["InvoiceDate"] >= pd.Timestamp(start_date)) &
-                      (out["InvoiceDate"] <= pd.Timestamp(end_date))]
+        if filename.endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(file_content))
+        else:
+            # Try different engines for Excel
+            try:
+                df = pd.read_excel(io.BytesIO(file_content), engine='openpyxl')
+            except:
+                df = pd.read_excel(io.BytesIO(file_content), engine='xlrd')
         
-        for col_ui, key in [("Branch","branch"),("Salesperson","salesperson"),("ClientName","clientname"),("Specialty","specialty")]:
-            if key in filters and filters[key] and col_ui in out.columns:
-                out = out[out[col_ui].isin(filters[key])]
+        # Normalize and clean data
+        df = normalize_columns(df)
+        df = clean_data(df)
         
-        if filters.get("high_value_only") and "Tests_999_Flag" in out.columns:
-            out = out[out["Tests_999_Flag"]]
-        
-        if filters.get("test_search") and "TestName" in out.columns:
-            term = str(filters["test_search"]).lower().strip()
-            if term:
-                out = out[out["TestName"].astype(str).str.lower().str.contains(term, na=False)]
-    except Exception as e:
-        logger.warning(f"Filter error: {e}")
-    
-    return out
+        return df, []
 
-def compute_target_metrics(df, monthly_target):
-    if df is None or df.empty:
+    except Exception as e:
+        return None, [f"Error loading file: {str(e)}"]
+
+def calculate_target_metrics(df, monthly_target):
+    """Calculate target tracking metrics"""
+    if df.empty:
         return {
-            "daily_target": 0, "days_in_month": 30, "days_elapsed": 0, "days_remaining": 30,
-            "expected_revenue": 0, "actual_revenue": 0, "variance_amount": 0, "variance_percent": 0,
-            "monthly_projection": 0, "completion_percent": 0, "daily_average": 0,
-            "remaining_target": monthly_target, "required_daily_run_rate": 0
+            'expected_revenue': 0, 'actual_revenue': 0, 'variance_amount': 0,
+            'variance_percent': 0, 'monthly_projection': 0, 'completion_percent': 0,
+            'days_elapsed': 0, 'days_in_month': 30
         }
     
-    today = datetime.now()
-    y, m, d = today.year, today.month, today.day
-    days_in_month = calendar.monthrange(y, m)[1]
-    days_elapsed = min(d, days_in_month)
-    days_remaining = max(0, days_in_month - d)
+    # Current month calculations
+    now = datetime.now()
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    days_elapsed = now.day
+
     daily_target = monthly_target / days_in_month
-    
-    month_start = pd.Timestamp(datetime(y, m, 1))
-    mtd = df[(df["InvoiceDate"] >= month_start) & (df["InvoiceDate"] <= pd.Timestamp(today.date()))]
-    actual = float(mtd["NetRevenue"].sum()) if "NetRevenue" in df.columns else 0.0
-    
-    expected = daily_target * days_elapsed
-    variance_amount = actual - expected
-    variance_percent = (variance_amount / expected * 100.0) if expected > 0 else 0.0
-    daily_avg = (actual / days_elapsed) if days_elapsed > 0 else 0.0
-    monthly_projection = daily_avg * days_in_month
-    completion_percent = (days_elapsed / days_in_month) * 100.0
-    remaining_target = max(0.0, monthly_target - actual)
-    required_daily_run_rate = (remaining_target / days_remaining) if days_remaining > 0 else 0.0
-    
+    expected_revenue = daily_target * days_elapsed
+
+    # Current month data
+    current_month = now.replace(day=1)
+    current_data = df[df['InvoiceDate'] >= current_month]
+    actual_revenue = current_data['NetRevenue'].sum()
+
+    # Calculate metrics
+    variance_amount = actual_revenue - expected_revenue
+    variance_percent = (variance_amount / expected_revenue * 100) if expected_revenue > 0 else 0
+    daily_average = actual_revenue / days_elapsed if days_elapsed > 0 else 0
+    monthly_projection = daily_average * days_in_month
+    completion_percent = (actual_revenue / monthly_target * 100) if monthly_target > 0 else 0
+
     return {
-        "daily_target": daily_target, "days_in_month": days_in_month, "days_elapsed": days_elapsed, "days_remaining": days_remaining,
-        "expected_revenue": expected, "actual_revenue": actual, "variance_amount": variance_amount, "variance_percent": variance_percent,
-        "monthly_projection": monthly_projection, "completion_percent": completion_percent, "daily_average": daily_avg,
-        "remaining_target": remaining_target, "required_daily_run_rate": required_daily_run_rate
+        'expected_revenue': expected_revenue,
+        'actual_revenue': actual_revenue,
+        'variance_amount': variance_amount,
+        'variance_percent': variance_percent,
+        'monthly_projection': monthly_projection,
+        'completion_percent': completion_percent,
+        'days_elapsed': days_elapsed,
+        'days_in_month': days_in_month
     }
 
-def filters_ui(df):
-    with st.expander("Filters", expanded=True):
-        cols = st.columns(4)
-        date_range = None
-        
-        if "InvoiceDate" in df.columns:
-            min_d = df["InvoiceDate"].min().date()
-            max_d = df["InvoiceDate"].max().date()
-            with cols:
-                date_range = st.date_input("Date Range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
-        
-        f = {"date_range": date_range if isinstance(date_range, tuple) and len(date_range) == 2 else None}
-        
-        with cols[1]:
-            if "Branch" in df.columns:
-                f["branch"] = st.multiselect("Branch", sorted(df["Branch"].dropna().astype(str).unique().tolist()))
-        
-        with cols[22]:
-            if "Salesperson" in df.columns:
-                f["salesperson"] = st.multiselect("Salesperson", sorted(df["Salesperson"].dropna().astype(str).unique().tolist()))
-        
-        with cols:
-            if "Specialty" in df.columns:
-                f["specialty"] = st.multiselect("Specialty", sorted(df["Specialty"].dropna().astype(str).unique().tolist()))
-        
-        cols2 = st.columns(2)
-        with cols2:
-            f["high_value_only"] = st.checkbox("Only tests >= Rs999", value=False)
-        with cols2[1]:
-            f["test_search"] = st.text_input("Search Test Name", placeholder="Enter test name...")
+def calculate_clients_added_mtd(df):
+    """Calculate clients added in current month"""
+    if df.empty or 'ClientAddedDate' not in df.columns:
+        return 0
     
-    return f
+    current_month = datetime.now().replace(day=1)
+    current_month_clients = df[df['ClientAddedDate'] >= current_month]
+    return current_month_clients['ClientName'].nunique()
 
-# Initialize session state
-config = load_config()
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "warnings" not in st.session_state:
-    st.session_state.warnings = []
-if "monthly_target" not in st.session_state:
-    mon = datetime.now().month
-    st.session_state.monthly_target = float(config.get("targets", {}).get(mon, config.get("monthly_target", 10000000.0)))
+# ==============================================================================
+# MAIN DASHBOARD
+# ==============================================================================
 
-# Premium sidebar navigation - Fixed with simple strings
-with st.sidebar:
-    st.markdown("### Truemedix Navigation")
-    nav_options = ["Upload & Status", "Overview", "Performance", "Collections", "Targets", "Data"]
-    nav = st.radio("Select Section", nav_options, index=0)
-
-# Header
-st.title("Truemedix Analytics Dashboard")
-st.caption("Minimal, fast, and reliable revenue insights with robust Excel handling and intelligent target tracking.")
-
-# Navigation logic - Fixed with proper string comparisons
-if nav == "Upload & Status":
-    st.subheader("Data Upload")
-    upl = st.file_uploader("Upload Excel/CSV", type=["csv","xlsx","xls"])
+def main():
+    st.set_page_config(
+        page_title="Truemedix Analytics",
+        page_icon="🧪",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
     
-    if upl is not None:
-        with st.spinner("Processing file..."):
-            file_bytes = upl.read()
-            df_raw, notes, errs = load_and_process_file(file_bytes, upl.name)
+    # Load config
+    config = load_config()
+
+    # Initialize session state
+    if 'df' not in st.session_state:
+        st.session_state.df = None
+    if 'monthly_target' not in st.session_state:
+        st.session_state.monthly_target = config.get('monthly_target', DEFAULT_TARGET)
+
+    # Sidebar Navigation
+    with st.sidebar:
+        st.title("🧪 Truemedix Analytics")
+        
+        page = st.selectbox(
+            "Navigation",
+            ["Upload", "Overview", "Performance", "Collections", "Targets", "Data"],
+            index=1 if st.session_state.df is not None else 0
+        )
+        
+        st.divider()
+        
+        # File upload section
+        if page == "Upload" or st.session_state.df is None:
+            st.header("📁 Upload Data")
             
-            if errs:
-                st.error("File processing errors:")
-                for e in errs:
-                    st.error(f"• {e}")
+            uploaded_file = st.file_uploader(
+                "Choose Excel/CSV file",
+                type=['xlsx', 'xls', 'csv'],
+                help="Upload your lab billing data"
+            )
             
-            if notes:
-                with st.expander("Processing details", expanded=len(errs) == 0):
-                    for n in notes:
-                        if str(n).startswith("ERROR"):
-                            st.error(n)
-                        else:
-                            st.info(n)
-                st.session_state.warnings = list(notes)
-            
-            if df_raw is not None and len(df_raw) > 0:
-                st.session_state.df = transform_data(df_raw)
-                config["last_file_path"] = upl.name
-                save_config(config)
+            if uploaded_file:
+                file_content = uploaded_file.read()
+                df, errors = load_excel_file(file_content, uploaded_file.name)
                 
-                if not errs:
-                    st.success(f"Loaded {len(st.session_state.df):,} records")
-                else:
-                    st.warning(f"Loaded {len(st.session_state.df):,} records with issues")
-    
-    if st.session_state.df is not None:
+                if errors:
+                    for error in errors:
+                        st.error(error)
+                
+                if df is not None and len(df) > 0:
+                    st.session_state.df = df
+                    st.success(f"✅ Loaded {len(df):,} records")
+                    st.info(f"📅 Date range: {df['InvoiceDate'].min().date()} to {df['InvoiceDate'].max().date()}")
+        
+        # Target settings
+        if st.session_state.df is not None:
+            st.header("🎯 Monthly Target")
+            
+            # Quick presets
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("₹50L"):
+                    st.session_state.monthly_target = 5000000
+                if st.button("₹1.5Cr"):
+                    st.session_state.monthly_target = 15000000
+            with col2:
+                if st.button("₹1Cr"):
+                    st.session_state.monthly_target = 10000000
+                if st.button("₹2Cr"):
+                    st.session_state.monthly_target = 20000000
+            
+            # Manual input
+            target = st.number_input(
+                "Custom Target (₹)",
+                value=float(st.session_state.monthly_target),
+                step=100000.0,
+                format="%.0f"
+            )
+            st.session_state.monthly_target = target
+            
+            if st.button("💾 Save Target"):
+                config['monthly_target'] = target
+                save_config(config)
+                st.success("Target saved!")
+
+    # Main content
+    if st.session_state.df is None:
+        st.title("🧪 Truemedix Diagnostics Lab Dashboard")
+        st.info("👈 Please upload an Excel/CSV file to begin analysis")
+        
+        # Show expected format
+        st.subheader("Expected Data Format")
+        sample_data = {
+            'InvoiceDate': ['2024-01-15', '2024-01-16'],
+            'Branch': ['Main Branch', 'North Branch'],
+            'Salesperson': ['John Doe', 'Jane Smith'],
+            'ClientName': ['Hospital A', 'Clinic B'],
+            'TestName': ['Blood Test', 'X-Ray'],
+            'NetRevenue': ['1000', '1500'],
+            'BilledAmount': ['1200', '1800'],
+            'ClientAddedDate': ['2023-12-01', '2024-01-10']
+        }
+        st.dataframe(pd.DataFrame(sample_data))
+        return
+
+    df = st.session_state.df
+
+    # Apply filters (common across all pages)
+    with st.expander("🔍 Filters", expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            date_range = st.date_input(
+                "Date Range",
+                value=(df['InvoiceDate'].min().date(), df['InvoiceDate'].max().date()),
+                min_value=df['InvoiceDate'].min().date(),
+                max_value=df['InvoiceDate'].max().date()
+            )
+        
+        with col2:
+            branches = st.multiselect(
+                "Branch",
+                options=sorted(df['Branch'].unique()) if 'Branch' in df.columns else [],
+                default=[]
+            )
+        
+        with col3:
+            salespersons = st.multiselect(
+                "Salesperson", 
+                options=sorted(df['Salesperson'].unique()) if 'Salesperson' in df.columns else [],
+                default=[]
+            )
+        
+        with col4:
+            high_value_only = st.checkbox("High-value tests only (≥₹999)")
+            test_search = st.text_input("Search Test Name", placeholder="Enter test name...")
+
+    # Apply filters to dataframe
+    filtered_df = df.copy()
+
+    if len(date_range) == 2:
+        filtered_df = filtered_df[
+            (filtered_df['InvoiceDate'].dt.date >= date_range[0]) &
+            (filtered_df['InvoiceDate'].dt.date <= date_range[1])
+        ]
+
+    if branches:
+        filtered_df = filtered_df[filtered_df['Branch'].isin(branches)]
+
+    if salespersons:
+        filtered_df = filtered_df[filtered_df['Salesperson'].isin(salespersons)]
+
+    if high_value_only:
+        filtered_df = filtered_df[filtered_df['NetRevenue'] >= 999]
+
+    if test_search:
+        filtered_df = filtered_df[
+            filtered_df['TestName'].str.contains(test_search, case=False, na=False)
+        ]
+
+    # Page content based on selection
+    if page == "Overview":
+        st.title("📊 Dashboard Overview")
+        
+        # 5-metric row
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        total_revenue = filtered_df['NetRevenue'].sum()
+        amount_collected = filtered_df['NetRevenue'].sum()  # Assuming collected = net revenue
+        amount_due = filtered_df['BilledAmount'].sum() - amount_collected
+        total_tests = len(filtered_df)
+        clients_added_mtd = calculate_clients_added_mtd(filtered_df)
+        
+        with col1:
+            st.metric("💰 Total Revenue", f"₹{total_revenue:,.0f}")
+        with col2:
+            st.metric("✅ Amount Collected", f"₹{amount_collected:,.0f}")
+        with col3:
+            st.metric("⏳ Amount Due", f"₹{amount_due:,.0f}")
+        with col4:
+            st.metric("🧪 Total Tests", f"{total_tests:,}")
+        with col5:
+            st.metric("👥 Clients Added (MTD)", f"{clients_added_mtd:,}")
+        
         st.divider()
-        df_info = st.session_state.df
-        colA, colB, colC = st.columns(3)
         
-        with colA:
-            st.metric("Records", f"{len(df_info):,}")
-        with colB:
-            if "InvoiceDate" in df_info.columns:
-                min_date = df_info["InvoiceDate"].min().date()
-                max_date = df_info["InvoiceDate"].max().date()
-                st.metric("Date Range", f"{min_date} to {max_date}")
-        with colC:
-            if "NetRevenue" in df_info.columns:
-                total_rev = df_info["NetRevenue"].sum()
-                st.metric("Total Revenue", f"Rs{total_rev:,.0f}")
-
-elif nav == "Overview":
-    if st.session_state.df is not None:
-        df_view = apply_filters(st.session_state.df, filters_ui(st.session_state.df))
+        # Target tracking row
+        target_metrics = calculate_target_metrics(filtered_df, st.session_state.monthly_target)
         
-        # Metrics
-        m1, m2, m3, m4 = st.columns(4, gap="medium")
-        total_revenue = float(df_view["NetRevenue"].sum()) if "NetRevenue" in df_view.columns else 0.0
-        total_billed = float(df_view["BilledAmount"].sum()) if "BilledAmount" in df_view.columns else 0.0
-        total_tests = len(df_view)
-        total_due = max(0.0, total_billed - total_revenue) if total_billed and total_revenue is not None else 0.0
+        col1, col2, col3 = st.columns(3)
         
-        with m1: 
-            st.metric("Revenue", f"Rs{total_revenue:,.0f}")
-        with m2: 
-            st.metric("Collected", f"Rs{total_revenue:,.0f}")
-        with m3: 
-            st.metric("Due", f"Rs{total_due:,.0f}")
-        with m4: 
-            st.metric("Tests", f"{total_tests:,}")
+        with col1:
+            variance_delta = f"₹{target_metrics['variance_amount']:+,.0f} ({target_metrics['variance_percent']:+.1f}%)"
+            st.metric(
+                "🎯 Target by Today",
+                f"₹{target_metrics['expected_revenue']:,.0f}",
+                delta=variance_delta
+            )
         
-        # Target metrics
-        t = compute_target_metrics(df_view, float(st.session_state.monthly_target))
-        tm1, tm2, tm3 = st.columns(3, gap="medium")
+        with col2:
+            projection_vs_target = target_metrics['monthly_projection'] - st.session_state.monthly_target
+            st.metric(
+                "📈 Monthly Projection",
+                f"₹{target_metrics['monthly_projection']:,.0f}",
+                delta=f"₹{projection_vs_target:+,.0f}"
+            )
         
-        with tm1: 
-            target_val = f"Rs{t['expected_revenue']:,.0f}"
-            variance_amt = t['variance_amount']
-            variance_pct = t['variance_percent']
-            target_delta = f"Rs{variance_amt:,.0f} ({variance_pct:+.1f}%)"
-            st.metric("Target by Today", target_val, delta=target_delta)
-        
-        with tm2: 
-            proj_val = f"Rs{t['monthly_projection']:,.0f}"
-            monthly_target_val = float(st.session_state.monthly_target)
-            proj_delta_amt = t['monthly_projection'] - monthly_target_val
-            proj_delta = f"Rs{proj_delta_amt:,.0f}"
-            st.metric("Monthly Projection", proj_val, delta=proj_delta)
-        
-        with tm3: 
-            comp_val = f"{t['completion_percent']:.1f}%"
-            comp_delta = f"Day {t['days_elapsed']} of {t['days_in_month']}"
-            st.metric("Target Completion", comp_val, delta=comp_delta)
+        with col3:
+            st.metric(
+                "🏁 Target Completion %",
+                f"{target_metrics['completion_percent']:.1f}%",
+                delta=f"Day {target_metrics['days_elapsed']}/{target_metrics['days_in_month']}"
+            )
         
         st.divider()
         
-        # Daily revenue chart
-        if "InvoiceDate" in df_view.columns and "NetRevenue" in df_view.columns:
-            st.subheader("Daily Revenue")
-            daily = df_view.groupby(df_view["InvoiceDate"].dt.date)["NetRevenue"].sum().reset_index()
-            daily.columns = ["Date","Revenue"]
-            fig_daily = px.line(daily, x="Date", y="Revenue", markers=True)
-            fig_daily.update_layout(height=380, showlegend=False, margin=dict(l=10,r=10,t=30,b=10))
-            st.plotly_chart(fig_daily, use_container_width=True)
-    else:
-        st.info("Please upload data first using 'Upload & Status'")
-
-elif nav == "Performance":
-    if st.session_state.df is not None:
-        df_view = apply_filters(st.session_state.df, filters_ui(st.session_state.df))
-        c1, c2 = st.columns(2, gap="medium")
+        # Charts
+        col1, col2 = st.columns(2)
         
-        with c1:
-            if "Salesperson" in df_view.columns and "NetRevenue" in df_view.columns:
-                st.subheader("By Salesperson")
-                rank = df_view.groupby("Salesperson")["NetRevenue"].sum().sort_values(ascending=True)
-                fig_sp = px.bar(x=rank.values, y=rank.index, orientation="h")
-                fig_sp.update_layout(height=380, showlegend=False, margin=dict(l=10,r=10,t=30,b=10))
-                st.plotly_chart(fig_sp, use_container_width=True)
+        with col1:
+            # Daily revenue chart
+            st.subheader("📈 Daily Revenue Trend")
+            daily_revenue = filtered_df.groupby(filtered_df['InvoiceDate'].dt.date)['NetRevenue'].sum().reset_index()
+            
+            fig = px.line(
+                daily_revenue,
+                x='InvoiceDate',
+                y='NetRevenue',
+                title="Daily Revenue"
+            )
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
         
-        with c2:
-            if "Branch" in df_view.columns and "NetRevenue" in df_view.columns:
-                st.subheader("By Branch")
-                rankb = df_view.groupby("Branch")["NetRevenue"].sum().sort_values(ascending=True)
-                fig_b = px.bar(x=rankb.values, y=rankb.index, orientation="h")
-                fig_b.update_layout(height=380, showlegend=False, margin=dict(l=10,r=10,t=30,b=10))
-                st.plotly_chart(fig_b, use_container_width=True)
-    else:
-        st.info("Please upload data first using 'Upload & Status'")
-
-elif nav == "Collections":
-    if st.session_state.df is not None:
-        df_view = apply_filters(st.session_state.df, filters_ui(st.session_state.df))
-        st.subheader("Collection Rate Analysis")
+        with col2:
+            # Salesperson performance
+            st.subheader("👨‍💼 Salesperson Performance")
+            if 'Salesperson' in filtered_df.columns:
+                salesperson_revenue = filtered_df.groupby('Salesperson')['NetRevenue'].sum().reset_index()
+                salesperson_revenue = salesperson_revenue.sort_values('NetRevenue', ascending=True).tail(10)
+                
+                fig = px.bar(
+                    salesperson_revenue,
+                    x='NetRevenue',
+                    y='Salesperson',
+                    orientation='h',
+                    title="Revenue by Salesperson"
+                )
+                fig.update_layout(height=300)
+                st.plotly_chart(fig, use_container_width=True)
         
-        total_gross = float(df_view["BilledAmount"].sum()) if "BilledAmount" in df_view.columns else 0.0
-        total_net = float(df_view["NetRevenue"].sum()) if "NetRevenue" in df_view.columns else 0.0
-        rate = (total_net / total_gross * 100.0) if total_gross > 0 else 0.0
+        # Collection rate gauge
+        collection_rate = (amount_collected / filtered_df['BilledAmount'].sum() * 100) if filtered_df['BilledAmount'].sum() > 0 else 0
         
-        fig_g = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=rate,
-            title={"text": "Collection Rate (%)"},
-            gauge={
-                "axis": {"range": [0,100]},
-                "bar": {"color": "darkblue"},
-                "steps": [
-                    {"range": [0,50], "color": "lightgray"},
-                    {"range": [50,80], "color": "yellow"},
-                    {"range": [80,100], "color": "green"}
+        st.subheader("💳 Collection Rate")
+        fig = go.Figure(go.Indicator(
+            mode = "gauge+number",
+            value = collection_rate,
+            domain = {'x': [0, 1], 'y': [0, 1]},
+            title = {'text': "Collection Rate %"},
+            gauge = {
+                'axis': {'range': [None, 100]},
+                'bar': {'color': "darkblue"},
+                'steps': [
+                    {'range': [0, 50], 'color': "lightgray"},
+                    {'range': [50, 80], 'color': "gray"},
+                    {'range': [80, 100], 'color': "lightgreen"}
                 ],
-                "threshold": {"line": {"color": "red", "width": 4}, "thickness": 0.75, "value": 90}
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': 90
+                }
             }
         ))
-        fig_g.update_layout(height=380, margin=dict(l=10,r=10,t=30,b=10))
-        st.plotly_chart(fig_g, use_container_width=True)
-    else:
-        st.info("Please upload data first using 'Upload & Status'")
+        fig.update_layout(height=300)
+        st.plotly_chart(fig, use_container_width=True)
 
-elif nav == "Targets":
-    st.subheader("Monthly Target Configuration")
-    current_month = datetime.now().month
-    
-    val = st.number_input(
-        f"Target (Rs) - {calendar.month_name[current_month]}",
-        value=float(st.session_state.monthly_target or 10000000.0),
-        min_value=0.0, 
-        step=100000.0, 
-        format="%.0f"
-    )
-    st.session_state.monthly_target = float(val)
-    
-    # Quick preset buttons
-    pc1, pc2, pc3, pc4 = st.columns(4, gap="small")
-    
-    with pc1:
-        if st.button("Rs50L"): 
-            st.session_state.monthly_target = 5000000.0
-            st.rerun()
-    with pc2:
-        if st.button("Rs1Cr"): 
-            st.session_state.monthly_target = 10000000.0
-            st.rerun()
-    with pc3:
-        if st.button("Rs1.5Cr"): 
-            st.session_state.monthly_target = 15000000.0
-            st.rerun()
-    with pc4:
-        if st.button("Rs2Cr"): 
-            st.session_state.monthly_target = 20000000.0
-            st.rerun()
-    
-    if st.button("Save Target"):
-        config["monthly_target"] = float(st.session_state.monthly_target)
-        config["targets"][current_month] = float(st.session_state.monthly_target)
-        save_config(config)
-        st.success("Target saved successfully!")
-
-elif nav == "Data":
-    if st.session_state.df is not None:
-        df_view = apply_filters(st.session_state.df, filters_ui(st.session_state.df))
-        st.subheader("Detailed Data View")
+    elif page == "Performance":
+        st.title("🏆 Performance Analysis")
         
-        display_cols = [c for c in ["InvoiceDate","NetRevenue","BilledAmount","Branch","Salesperson","ClientName","Specialty","TestName"] if c in df_view.columns]
+        # Top/Bottom performers analysis (simplified)
+        analysis_type = st.radio("Analysis Type", ["Top Performers", "Bottom Performers"], horizontal=True)
+        num_performers = st.slider("Number to Show", 1, 10, 5)
         
-        if display_cols:
-            sel_cols = st.multiselect("Select Columns to Display", display_cols, default=display_cols)
-            if sel_cols:
-                tbl = df_view[sel_cols].sort_values(display_cols, ascending=False)
-                st.dataframe(tbl, use_container_width=True)
-                
-                csv = tbl.to_csv(index=False).encode("utf-8")
-                dt_str = datetime.now().strftime('%Y%m%d')
-                st.download_button("Download CSV", data=csv, file_name=f"truemedix_data_{dt_str}.csv", mime="text/csv")
-        else:
-            st.info("No displayable columns found. Upload a dataset with required fields.")
-    else:
-        st.info("Please upload data first using 'Upload & Status'")
+        if 'Salesperson' in filtered_df.columns:
+            performance = filtered_df.groupby('Salesperson').agg({
+                'NetRevenue': ['sum', 'count', 'mean'],
+                'ClientName': 'nunique'
+            }).round(2)
+            
+            performance.columns = ['Total_Revenue', 'Total_Tests', 'Avg_Test_Value', 'Unique_Clients']
+            
+            if analysis_type == "Top Performers":
+                performance = performance.sort_values('Total_Revenue', ascending=False).head(num_performers)
+                color = 'green'
+            else:
+                performance = performance.sort_values('Total_Revenue', ascending=True).head(num_performers)
+                color = 'red'
+            
+            performance = performance.reset_index()
+            
+            fig = px.bar(
+                performance,
+                x='Total_Revenue',
+                y='Salesperson',
+                orientation='h',
+                title=f"{analysis_type} by Revenue",
+                color_discrete_sequence=[color]
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.dataframe(performance, use_container_width=True)
 
-else:
-    st.info("Please select a section from the sidebar to begin.")
+    elif page == "Collections":
+        st.title("💳 Collections Analysis")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Total Billed", f"₹{filtered_df['BilledAmount'].sum():,.0f}")
+            st.metric("Total Collected", f"₹{filtered_df['NetRevenue'].sum():,.0f}")
+        
+        with col2:
+            collection_rate = (filtered_df['NetRevenue'].sum() / filtered_df['BilledAmount'].sum() * 100) if filtered_df['BilledAmount'].sum() > 0 else 0
+            outstanding = filtered_df['BilledAmount'].sum() - filtered_df['NetRevenue'].sum()
+            st.metric("Collection Rate", f"{collection_rate:.1f}%")
+            st.metric("Outstanding", f"₹{outstanding:,.0f}")
+        
+        # Monthly collection trend
+        monthly_collections = filtered_df.groupby(filtered_df['InvoiceDate'].dt.to_period('M')).agg({
+            'BilledAmount': 'sum',
+            'NetRevenue': 'sum'
+        }).reset_index()
+        monthly_collections['Collection_Rate'] = (monthly_collections['NetRevenue'] / monthly_collections['BilledAmount'] * 100)
+        monthly_collections['InvoiceDate'] = monthly_collections['InvoiceDate'].astype(str)
+        
+        fig = px.line(
+            monthly_collections,
+            x='InvoiceDate',
+            y='Collection_Rate',
+            title="Monthly Collection Rate Trend"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif page == "Targets":
+        st.title("🎯 Target Management")
+        
+        target_metrics = calculate_target_metrics(filtered_df, st.session_state.monthly_target)
+        
+        # Target summary
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Monthly Target", f"₹{st.session_state.monthly_target:,.0f}")
+            st.metric("Daily Target", f"₹{st.session_state.monthly_target/target_metrics['days_in_month']:,.0f}")
+        
+        with col2:
+            st.metric("Achieved So Far", f"₹{target_metrics['actual_revenue']:,.0f}")
+            st.metric("Remaining Target", f"₹{st.session_state.monthly_target - target_metrics['actual_revenue']:,.0f}")
+        
+        with col3:
+            st.metric("Projected Final", f"₹{target_metrics['monthly_projection']:,.0f}")
+            st.metric("Days Remaining", f"{target_metrics['days_in_month'] - target_metrics['days_elapsed']}")
+        
+        # Progress visualization
+        progress = min(100, target_metrics['completion_percent'])
+        st.progress(progress / 100, text=f"Target Progress: {progress:.1f}%")
+        
+        # Target vs actual chart
+        target_vs_actual = pd.DataFrame({
+            'Metric': ['Target by Today', 'Actual Revenue', 'Monthly Target', 'Projected Final'],
+            'Amount': [
+                target_metrics['expected_revenue'],
+                target_metrics['actual_revenue'],
+                st.session_state.monthly_target,
+                target_metrics['monthly_projection']
+            ]
+        })
+        
+        fig = px.bar(target_vs_actual, x='Metric', y='Amount', title="Target Analysis")
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif page == "Data":
+        st.title("📋 Data Table")
+        
+        st.write(f"Showing {len(filtered_df):,} records")
+        
+        # Column selection
+        available_columns = list(filtered_df.columns)
+        selected_columns = st.multiselect(
+            "Select columns to display",
+            available_columns,
+            default=available_columns[:8]  # Show first 8 columns by default
+        )
+        
+        if selected_columns:
+            display_df = filtered_df[selected_columns]
+            st.dataframe(display_df, use_container_width=True)
+            
+            # Download button
+            csv = display_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv,
+                file_name="truemedix_data.csv",
+                mime="text/csv"
+            )
+
+if __name__ == "__main__":
+    main()
