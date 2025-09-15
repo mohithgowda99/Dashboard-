@@ -24,6 +24,8 @@ from pathlib import Path
 import hashlib
 from dataclasses import dataclass, asdict, field
 import math
+import shutil
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -143,17 +145,16 @@ COLUMN_MAPPING = {
 }
 
 # ==============================================================================
-# INTELLIGENT DATA PROCESSOR
+# FILE MANAGEMENT SYSTEM
 # ==============================================================================
 
-class AdvancedDataProcessor:
-    """Advanced data processor with intelligent column mapping and fallback logic"""
+class FileManager:
+    """Enhanced file management for uploads and processing"""
     
     def __init__(self, config: DataConfig):
         self.config = config
-        self.stats = ProcessingStats()
         self.ensure_directories()
-        
+    
     def ensure_directories(self):
         """Create necessary directories if they don't exist"""
         try:
@@ -162,6 +163,77 @@ class AdvancedDataProcessor:
         except Exception as e:
             logger.warning(f"Could not create directories: {e}")
     
+    def save_uploaded_file(self, uploaded_file, file_type: str = "daily") -> Tuple[bool, str]:
+        """
+        Save uploaded file to appropriate folder
+        file_type: 'daily' or 'historical'
+        """
+        try:
+            folder = self.config.daily_folder if file_type == "daily" else self.config.historical_folder
+            
+            # Generate unique filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{timestamp}_{uploaded_file.name}"
+            filepath = os.path.join(folder, filename)
+            
+            # Save file
+            with open(filepath, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            return True, filepath
+            
+        except Exception as e:
+            logger.error(f"Error saving file: {e}")
+            return False, str(e)
+    
+    def list_files(self) -> Dict[str, List[str]]:
+        """List all files in both folders"""
+        files = {
+            'historical': [],
+            'daily': []
+        }
+        
+        try:
+            # Historical files
+            if os.path.exists(self.config.historical_folder):
+                for ext in self.config.supported_formats:
+                    pattern = os.path.join(self.config.historical_folder, f"*{ext}")
+                    files['historical'].extend(glob.glob(pattern))
+            
+            # Daily files
+            if os.path.exists(self.config.daily_folder):
+                for ext in self.config.supported_formats:
+                    pattern = os.path.join(self.config.daily_folder, f"*{ext}")
+                    files['daily'].extend(glob.glob(pattern))
+        
+        except Exception as e:
+            logger.error(f"Error listing files: {e}")
+        
+        return files
+    
+    def delete_file(self, filepath: str) -> bool:
+        """Delete a specific file"""
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting file: {e}")
+            return False
+
+# ==============================================================================
+# INTELLIGENT DATA PROCESSOR (ENHANCED)
+# ==============================================================================
+
+class AdvancedDataProcessor:
+    """Advanced data processor with intelligent column mapping and fallback logic"""
+    
+    def __init__(self, config: DataConfig):
+        self.config = config
+        self.stats = ProcessingStats()
+        self.file_manager = FileManager(config)
+        
     def find_column(self, df: pd.DataFrame, column_type: str) -> Tuple[str, str]:
         """
         Intelligently find the best matching column for a given type
@@ -209,6 +281,52 @@ class AdvancedDataProcessor:
             return False
         except Exception:
             return False
+    
+    def analyze_uploaded_file(self, uploaded_file) -> Tuple[pd.DataFrame, Dict, List[str]]:
+        """
+        Analyze uploaded file and return preview, mapping info, and warnings
+        """
+        try:
+            # Read file based on type
+            if uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file, encoding='utf-8', low_memory=False)
+            elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(uploaded_file, engine='openpyxl')
+            else:
+                return None, {}, ["Unsupported file format"]
+            
+            # Clean basic issues
+            df = df.dropna(how='all', axis=0)
+            df = df.dropna(how='all', axis=1)
+            df.columns = df.columns.astype(str).str.strip()
+            
+            # Analyze column structure
+            analysis = {
+                'filename': uploaded_file.name,
+                'rows': len(df),
+                'columns': len(df.columns),
+                'column_mapping': {},
+                'warnings': [],
+                'sample_data': df.head(5)
+            }
+            
+            # Check each column type
+            for column_type in COLUMN_MAPPING.keys():
+                found_column, source_level = self.find_column(df, column_type)
+                target_name = column_type.replace('_columns', '').title()
+                
+                if found_column:
+                    analysis['column_mapping'][target_name] = {
+                        'original': found_column,
+                        'level': source_level
+                    }
+                else:
+                    analysis['warnings'].append(f"No {target_name} column detected - will use fallback")
+            
+            return df, analysis, analysis['warnings']
+            
+        except Exception as e:
+            return None, {}, [f"Error analyzing file: {str(e)}"]
     
     def process_single_file(self, file_path: str) -> Tuple[pd.DataFrame, Dict]:
         """Process a single file with intelligent column mapping"""
@@ -346,15 +464,13 @@ class AdvancedDataProcessor:
         all_dataframes = []
         unique_ids = set()
         
-        # Process historical data
-        historical_files = self._get_files_in_folder(self.config.historical_folder)
-        daily_files = self._get_files_in_folder(self.config.daily_folder)
+        # Get files from file manager
+        files = self.file_manager.list_files()
+        all_files = files['historical'] + files['daily']
         
-        all_files = historical_files + daily_files
         self.stats.files_processed = len(all_files)
         
         if not all_files:
-            st.warning("⚠️ No data files found in historical/ or daily/ folders")
             return pd.DataFrame(), self.stats
         
         for file_path in all_files:
@@ -384,15 +500,6 @@ class AdvancedDataProcessor:
             master_df = pd.DataFrame()
         
         return master_df, self.stats
-    
-    def _get_files_in_folder(self, folder_path: str) -> List[str]:
-        """Get all supported files in a folder"""
-        files = []
-        if os.path.exists(folder_path):
-            for ext in self.config.supported_formats:
-                pattern = os.path.join(folder_path, f"*{ext}")
-                files.extend(glob.glob(pattern))
-        return sorted(files)
     
     def _final_data_processing(self, df: pd.DataFrame) -> pd.DataFrame:
         """Final processing and validation"""
@@ -709,7 +816,7 @@ class AdvancedVisualizations:
             }
 
 # ==============================================================================
-# MAIN STREAMLIT APPLICATION
+# MAIN STREAMLIT APPLICATION WITH FILE UPLOAD
 # ==============================================================================
 
 def main():
@@ -742,14 +849,23 @@ def main():
         padding: 1rem;
         margin: 0.5rem 0;
     }
+    .upload-box {
+        border: 2px dashed #cccccc;
+        border-radius: 10px;
+        padding: 2rem;
+        text-align: center;
+        background-color: #fafafa;
+        margin: 1rem 0;
+    }
     </style>
     """, unsafe_allow_html=True)
     
     st.title("🧪 Advanced Truemedix Analytics Dashboard")
-    st.markdown("*Intelligent data processing with anomaly detection and trend analysis*")
+    st.markdown("*Intelligent data processing with file upload and daily analytics*")
     
     # Initialize configuration
     config = DataConfig()
+    processor = AdvancedDataProcessor(config)
     
     # Initialize session state
     if 'master_data' not in st.session_state:
@@ -758,16 +874,83 @@ def main():
         st.session_state.processing_stats = None
     if 'last_refresh' not in st.session_state:
         st.session_state.last_refresh = None
+    if 'uploaded_files' not in st.session_state:
+        st.session_state.uploaded_files = []
     
     # Sidebar
     with st.sidebar:
         st.header("🔧 Data Management")
         
+        # File Upload Section
+        st.subheader("📤 Upload Files")
+        
+        # Upload type selector
+        upload_type = st.radio(
+            "File Type:",
+            ["Daily Data", "Historical Data"],
+            help="Daily: Today's data, Historical: Past months data"
+        )
+        
+        # File uploader
+        uploaded_files = st.file_uploader(
+            f"Upload {upload_type} Files",
+            type=['csv', 'xlsx', 'xls'],
+            accept_multiple_files=True,
+            help="You can upload multiple files at once"
+        )
+        
+        # Process uploaded files
+        if uploaded_files:
+            st.write("📋 **Uploaded Files:**")
+            
+            for uploaded_file in uploaded_files:
+                with st.expander(f"📄 {uploaded_file.name}"):
+                    # Analyze file
+                    sample_df, analysis, warnings = processor.analyze_uploaded_file(uploaded_file)
+                    
+                    if sample_df is not None:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Rows", analysis['rows'])
+                            st.metric("Columns", analysis['columns'])
+                        
+                        with col2:
+                            st.write("**Column Mapping:**")
+                            for target, info in analysis['column_mapping'].items():
+                                st.write(f"✅ {target}: `{info['original']}`")
+                        
+                        # Show warnings
+                        if warnings:
+                            st.warning("⚠️ **Warnings:**")
+                            for warning in warnings:
+                                st.write(f"• {warning}")
+                        
+                        # Show sample data
+                        st.write("**Sample Data:**")
+                        st.dataframe(analysis['sample_data'], use_container_width=True)
+                        
+                        # Save file button
+                        if st.button(f"💾 Save {uploaded_file.name}", key=f"save_{uploaded_file.name}"):
+                            file_type = "daily" if upload_type == "Daily Data" else "historical"
+                            success, message = processor.file_manager.save_uploaded_file(uploaded_file, file_type)
+                            
+                            if success:
+                                st.success(f"✅ File saved successfully!")
+                                st.session_state.uploaded_files.append(uploaded_file.name)
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Error saving file: {message}")
+                    else:
+                        st.error("❌ Could not analyze file")
+                        for warning in warnings:
+                            st.error(warning)
+        
+        st.divider()
+        
         # Data refresh section
         if st.button("🔄 Refresh All Data", type="primary"):
             with st.spinner("Processing all data files..."):
                 try:
-                    processor = AdvancedDataProcessor(config)
                     master_data, stats = processor.load_all_data()
                     
                     st.session_state.master_data = master_data
@@ -777,11 +960,46 @@ def main():
                     if len(master_data) > 0:
                         st.success(f"✅ Processed {stats.files_processed} files, loaded {stats.records_loaded:,} records")
                     else:
-                        st.warning("⚠️ No data loaded. Check if files exist in folders")
+                        st.warning("⚠️ No data loaded. Upload files first!")
                         
                 except Exception as e:
-                    st.error(f"❌ Error loading  {str(e)}")
+                    st.error(f"❌ Error loading data: {str(e)}")
                     logger.error(f"Data loading error: {e}")
+        
+        # Show file management
+        st.subheader("📁 File Management")
+        files = processor.file_manager.list_files()
+        
+        if files['daily'] or files['historical']:
+            # Daily files
+            if files['daily']:
+                st.write("**Daily Files:**")
+                for file_path in files['daily']:
+                    filename = os.path.basename(file_path)
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"📄 {filename}")
+                    with col2:
+                        if st.button("🗑️", key=f"del_daily_{filename}"):
+                            if processor.file_manager.delete_file(file_path):
+                                st.success("File deleted!")
+                                st.rerun()
+            
+            # Historical files
+            if files['historical']:
+                st.write("**Historical Files:**")
+                for file_path in files['historical']:
+                    filename = os.path.basename(file_path)
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"📄 {filename}")
+                    with col2:
+                        if st.button("🗑️", key=f"del_hist_{filename}"):
+                            if processor.file_manager.delete_file(file_path):
+                                st.success("File deleted!")
+                                st.rerun()
+        else:
+            st.info("No files uploaded yet")
         
         # Show processing stats
         if st.session_state.processing_stats:
@@ -835,31 +1053,45 @@ def main():
     
     # Main content
     if st.session_state.master_data is None or len(st.session_state.master_data) == 0:
-        st.info("👆 Click 'Refresh All Data' to load and process your files")
+        st.info("👆 Upload your files using the sidebar, then click 'Refresh All Data'")
         
-        # Show folder structure help
-        st.subheader("📁 Expected Folder Structure")
-        st.code("""
-        project/
-        ├── historical/          # Past 6 months data files
-        │   ├── jan_billing.xlsx
-        │   ├── feb_billing.csv
-        │   └── ...
-        ├── daily/              # Daily upload files
-        │   ├── today_data.xlsx
-        │   └── ...
-        └── app.py              # This script
+        # File upload help
+        st.markdown('<div class="upload-box">', unsafe_allow_html=True)
+        st.subheader("📤 Get Started")
+        st.markdown("""
+        **Daily Workflow:**
+        1. 📤 **Upload Historical Data** - Upload your past 6 months data files
+        2. 📤 **Upload Today's Data** - Upload today's progress/billing data  
+        3. 🔄 **Click 'Refresh All Data'** - Process and analyze all files
+        4. 📊 **View Analytics** - Get insights, trends, and anomaly detection
+        
+        **Supported Formats:** CSV, Excel (.xlsx, .xls)
         """)
+        st.markdown('</div>', unsafe_allow_html=True)
         
-        st.subheader("🔧 Supported Features")
+        # Show expected data structure
+        st.subheader("📋 Expected Data Structure")
+        st.write("Your files should contain columns similar to these (any variation is automatically detected):")
+        
+        sample_data = pd.DataFrame({
+            'Date': ['2024-01-15', '2024-01-16'],
+            'Client Name': ['Hospital A', 'Clinic B'],
+            'Amount/Revenue': [1500, 2000],
+            'Branch/Zone': ['Main', 'North'],
+            'Salesperson': ['John', 'Jane'],
+            'Test Name': ['Blood Test', 'X-Ray']
+        })
+        st.dataframe(sample_data, use_container_width=True)
+        
+        st.subheader("🔧 Key Features")
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("""
-            **Intelligent Data Processing:**
+            **Smart Data Processing:**
             - ✅ Auto-detects column formats
-            - ✅ Handles missing columns gracefully
+            - ✅ Handles missing columns gracefully  
             - ✅ Deduplicates records automatically
-            - ✅ Supports CSV, Excel formats
+            - ✅ Multi-file processing
             """)
         with col2:
             st.markdown("""
@@ -871,7 +1103,7 @@ def main():
             """)
         return
     
-    # Get data
+    # Get data and run analytics (rest of the dashboard code remains the same)
     df = st.session_state.master_data
     
     # Initialize analytics engines
@@ -1082,22 +1314,6 @@ def main():
                 st.metric("File Sources", df['SourceFile'].nunique())
             if st.session_state.last_refresh:
                 st.metric("Last Refresh", st.session_state.last_refresh.strftime("%H:%M:%S"))
-        
-        # Column information
-        st.subheader("📊 Column Information")
-        
-        column_info = []
-        for col in df.columns:
-            column_info.append({
-                'Column': col,
-                'Type': str(df[col].dtype),
-                'Non-Null Count': f"{df[col].count():,}",
-                'Null Count': f"{df[col].isnull().sum():,}",
-                'Unique Values': f"{df[col].nunique():,}"
-            })
-        
-        column_df = pd.DataFrame(column_info)
-        st.dataframe(column_df, use_container_width=True)
         
         # Sample data
         st.subheader("🔍 Sample Data")
