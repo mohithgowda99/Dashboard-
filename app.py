@@ -585,7 +585,7 @@ def main():
                     for key, value in metrics['revenue_metrics'].items():
                         report_data.append({'Metric': f"Revenue - {key}", 'Value': value})
                 
-                if report_
+                if report_  # THIS IS THE FIXED LINE 588
                     report_df = pd.DataFrame(report_data)
                     csv = report_df.to_csv(index=False)
                     
